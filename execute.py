@@ -20,10 +20,11 @@ from data_structures import (
 )
 
 from input_layer import INPUT_LAYER
-from target_audience import analyze_target_audience
+from target_audience import Optional, analyze_target_audience
 from AI_narrative_extraction import extract_narrative_features
-from cvf_graph_viz import visualize_ttp_overlap_network
-from cvf_model import map_to_cvf
+from cvf_graph_viz import visualize_ttp_radar
+from cvf_model import CVFResult
+from ttp_id import identify_ttp_dual
 from peripheral_analyzer import PERIPHERAL_ANALYZER
 
 
@@ -44,51 +45,80 @@ def NARRATIVE_INGEST(narrative: Narrative) -> Narrative:
     return narrative
 
 
-def RISK_SCORER(vuln_map, peripheral, cvf_result):
+def RISK_SCORER(
+    vuln_map,
+    peripheral,
+    identified_ttps: Optional[List[Dict[str, Any]]] = None
+) -> RiskAssessment:
     """
-    Computes a PMESII‑based instability score (0–1)
-    and converts it into a 1–100 risk index.
+    Computes PMESII-based instability and converts to 1–100 risk index.
+    
+    New design:
+    - No cvf_result dependency
+    - Optional boost from identified CAT TTPs (confidence-weighted)
+    - More granular hit detection
+    - Clear, maintainable logic
     """
+    if identified_ttps is None:
+        identified_ttps = []
 
-    # --- PMESII DOMAIN INSTABILITY ---
+    # --- Base Domain Scores (0.0–1.0) ---
 
-    # Political: identity conflict, institutional distrust
-    political = 1.0 if "institutional distrust" in vuln_map.sociocultural_hits else 0.3
+    # Political: institutional distrust, identity conflict
+    political_hits = {"institutional distrust", "corruption", "elite control"}
+    political = 1.0 if any(hit in political_hits for hit in vuln_map.sociocultural_hits) else 0.3
 
-    # Military: threat framing
-    military = 1.0 if "threat" in peripheral.framing_patterns else 0.2
+    # Military: direct threat framing
+    military_hits = {"threat", "attack", "aggression", "invasion"}
+    military = 1.0 if any(hit in military_hits for hit in peripheral.framing_patterns) else 0.2
 
-    # Economic: economic anxiety
-    economic = 1.0 if "economic anxiety" in vuln_map.sociocultural_hits else 0.3
+    # Economic: scarcity, anxiety
+    economic_hits = {"economic anxiety", "scarcity", "crisis"}
+    economic = 1.0 if any(hit in economic_hits for hit in vuln_map.sociocultural_hits) else 0.3
 
-    # Social: identity polarization
-    social = 0.6 if vuln_map.psychological_hits else 0.2
+    # Social: polarization, identity tension
+    social = 0.8 if vuln_map.psychological_hits else 0.2
+    social = max(social, 0.6 if "identity" in " ".join(vuln_map.sociocultural_hits).lower() else social)
 
-    # Information: CVF cognitive activation
-    information = cvf_result.cvf_score  # already 0–1
+    # Information: cognitive activation via identified TTPs
+    ttp_conf_sum = sum(t["confidence"] for t in identified_ttps)
+    information = min(1.0, ttp_conf_sum / 5.0)  # Normalize: 5 high-confidence TTPs = full
 
-    # Infrastructure: scarcity, urgency, crisis windows
-    infrastructure = 0.7 if "crisis_window" in peripheral.temporal_cues else 0.3
+    # Infrastructure: urgency, crisis windows
+    infra_hits = {"crisis_window", "urgency", "limited time", "now or never"}
+    infrastructure = 0.9 if any(hit in infra_hits for hit in peripheral.temporal_cues) else 0.3
 
-    # --- Weighted PMESII instability ---
+    # --- Weighted Instability ---
     instability = (
         0.20 * political +
-        0.10 * military +
-        0.20 * economic +
+        0.15 * military +
+        0.15 * economic +
         0.20 * social +
-        0.20 * information +
+        0.20 * information +   # Strong weight — cognitive is core
         0.10 * infrastructure
     )
 
     instability = max(0.0, min(1.0, instability))
 
-    # --- Convert to 1–100 risk index ---
+    # --- Risk Index (1–100) ---
     risk_index = int(instability * 99) + 1
+
+    # --- Confidence in Score ---
+    # Higher if multiple strong signals
+    signal_count = sum([
+        political > 0.5,
+        military > 0.5,
+        economic > 0.5,
+        social > 0.5,
+        information > 0.5,
+        infrastructure > 0.5
+    ])
+    confidence = 0.6 + 0.4 * (signal_count / 6.0)  # 0.6–1.0
 
     return RiskAssessment(
         risk_index=risk_index,
         instability=instability,
-        confidence=0.75,
+        confidence=round(confidence, 2),
         p=political,
         m=military,
         e=economic,
@@ -136,14 +166,45 @@ def visualize_pmesii_radar(risk):
 # -----------------------------
 # 7. REPORT GENERATOR
 # -----------------------------
-def REPORT_GENERATOR(features: NarrativeFeatures,
-                     vuln_map: VulnerabilityMap,
-                     peripheral: PeripheralSignals,
-                     risk: RiskAssessment,
-                     ta: TargetAudience) -> DiagnosticReport:
+def REPORT_GENERATOR(
+    features: NarrativeFeatures,
+    vuln_map: VulnerabilityMap,
+    peripheral: PeripheralSignals,
+    risk: RiskAssessment,
+    ta: TargetAudience,
+    identified_ttps,
+) -> DiagnosticReport:
+    """
+    Generates a comprehensive analyst-style diagnostic report.
+    Now includes direct CAT TTP identification with confidence.
+    """
     ta_dict = asdict(ta)
 
-    # Build a human-readable, analyst-style report
+    # --- Top Identified CAT TTPs Section ---
+    ttp_section = ""
+    if identified_ttps:
+        ttp_section += "### TOP IDENTIFIED TTPs (CAT + DISARM)\n\n"
+        ttp_section += "| Rank | Source  | TTP Name                     | ID              | Confidence |\n"
+        ttp_section += "|------|---------|------------------------------|-----------------|------------|\n"
+        for rank, ttp in enumerate(identified_ttps, 1):
+            source = ttp.get("source", "CAT")          # "CAT" or "DISARM"
+            name = ttp["name"]
+            ttp_id = ttp["id"]
+            conf = ttp["confidence"]
+
+            # Truncate long names for clean table layout (optional)
+            display_name = (name[:22] + "...") if len(name) > 25 else name
+
+            ttp_section += (
+                f"| {rank:<4} | {source:<7} | {display_name:<35} | {ttp_id:<15}  | {conf:.3f}     |\n"
+            )
+    else:
+        ttp_section += "### TOP IDENTIFIED TTPs (CAT + DISARM)\n"
+        ttp_section += "No relevant TTPs identified in the narrative.\n"
+
+    ttp_section += "\n"
+
+    # --- Full Report Text ---
     full_text = f"""
 NARRATIVE DIAGNOSTIC REPORT
 ===========================
@@ -151,15 +212,15 @@ NARRATIVE DIAGNOSTIC REPORT
 [1] TARGET AUDIENCE SUMMARY
 ---------------------------
 Demographics:
-  - Age Range: {ta_dict.get('demographics', {}).get('age_range')}
-  - Location: {ta_dict.get('demographics', {}).get('location')}
-  - Education: {ta_dict.get('demographics', {}).get('education_level')}
+  - Age Range: {ta_dict.get('demographics', {}).get('age_range', 'Unknown')}
+  - Location: {ta_dict.get('demographics', {}).get('location', 'Unknown')}
+  - Education: {ta_dict.get('demographics', {}).get('education_level', 'Unknown')}
 
 Orientation:
-  - Political Orientation: {ta_dict.get('political_orientation')}
-  - Group Identities: {', '.join(ta_dict.get('group_identities', []) or [])}
-  - Known Vulnerabilities: {', '.join(ta_dict.get('known_vulnerabilities', []) or [])}
-  - Information Channels: {', '.join(ta_dict.get('information_channels', []) or [])}
+  - Political Orientation: {ta_dict.get('political_orientation', 'Unknown')}
+  - Group Identities: {', '.join(ta_dict.get('group_identities', []) or ['None'])}
+  - Known Vulnerabilities: {', '.join(ta_dict.get('known_vulnerabilities', []) or ['None'])}
+  - Information Channels: {', '.join(ta_dict.get('information_channels', []) or ['None'])}
 
 [2] COGNITIVE VULNERABILITY PROFILE
 -----------------------------------
@@ -170,12 +231,12 @@ Sociocultural Vulnerabilities Exploited:
   - {', '.join(vuln_map.sociocultural_hits) or 'None clearly detected'}
 
 Summary:
-  - {vuln_map.vulnerability_summary.get('note')}
+  {vuln_map.vulnerability_summary.get('note', 'No summary available')}
 
 [3] NARRATIVE CHARACTERISTICS
 -----------------------------
 Narrative Category:
-  - {features.narrative_frames[0] if features.narrative_frames else 'Unclear'}  # Updated to use new field
+  - {features.narrative_frames[0] if features.narrative_frames else 'Unclear'}
 
 Detected Intents:
   - {', '.join(features.detected_intents) or 'Unclear'}
@@ -187,13 +248,12 @@ Identity Framing:
   - {', '.join(features.identity_features) or 'None prominent'}
 
 Rhetorical Devices:
-  - {', '.join(features.rhetorical_devices) or 'None prominent'}  # Updated to new LLM field
-
-TTP Signals:
-  - {', '.join(features.ttp_signals) or 'None detected'}  # New LLM field
+  - {', '.join(features.rhetorical_devices) or 'None prominent'}
 
 Cross-Narrative Links:
-  - {', '.join(features.cross_narrative_links) or 'None detected'}  # New LLM field
+  - {', '.join(features.cross_narrative_links) or 'None detected'}
+
+{ttp_section}
 
 [4] PERIPHERAL INDICATORS (COGNITIVE CONTEXT)
 ---------------------------------------------
@@ -209,7 +269,6 @@ Temporal Cues:
 Peripheral Influence Score:
   - {peripheral.peripheral_score:.2f}
 
-
 [5] RISK ASSESSMENT (PMESII Stability Model)
 -------------------------------------------
 Risk Index:
@@ -218,21 +277,20 @@ Risk Index:
 Instability (0–1):
   - {risk.instability:.2f}
 
-Drivers:
+Domain Drivers:
   - Political: {risk.p:.2f}
-  - Military (threat framing): {risk.m:.2f}
+  - Military: {risk.m:.2f}
   - Economic: {risk.e:.2f}
   - Social: {risk.s:.2f}
-  - Information (CVF): {risk.i:.2f}
-  - Infrastructure (temporal cues): {risk.infra:.2f}
+  - Information: {risk.i:.2f}
+  - Infrastructure: {risk.infra:.2f}
 """
 
     return DiagnosticReport(
         target_audience_summary=ta_dict,
         psychological_vulnerabilities=vuln_map.psychological_hits,
         sociocultural_vulnerabilities=vuln_map.sociocultural_hits,
-        narrative_category=features.narrative_frames[0]
-            if features.narrative_frames else "Unclear",  # Updated
+        narrative_category=features.narrative_frames[0] if features.narrative_frames else "Unclear",
         peripheral_indicators={
             "framing_patterns": peripheral.framing_patterns,
             "temporal_cues": peripheral.temporal_cues,
@@ -240,7 +298,8 @@ Drivers:
             "peripheral_score": peripheral.peripheral_score
         },
         risk_score=risk.risk_index,
-        full_report_text=full_text.strip()
+        full_report_text=full_text.strip(),
+        identified_ttps=identified_ttps  # ← Now accepted
     )
 
 
@@ -248,16 +307,25 @@ Drivers:
 # MAIN EXECUTION WORKFLOW
 # -----------------------------
 def run_pipeline(narrative_text: str, ta_raw: Dict[str, Any]):
+    """
+    Full NAM-D pipeline — local, deterministic, no grammar/LLM server for TTPs.
+    - Narrative feature extraction (LLM-powered)
+    - Target audience vulnerability analysis
+    - Peripheral signals
+    - Direct TTP identification via embedding similarity
+    - Risk scoring
+    - Radar visualizations
+    - Final report
+    """
+    # 1. Input processing
     payload = INPUT_LAYER(narrative_text, ta_raw)
     cleaned = NARRATIVE_INGEST(payload.narrative)
 
-    # 1. LLM-powered narrative feature extraction
+    # 2. LLM-powered narrative feature extraction
     llm_features_dict = extract_narrative_features(cleaned.raw_text)
 
-    # Map LLM output to NarrativeFeatures dataclass
-    # We use only the fields your grammar enforces + smart legacy mapping
+    # 3. Map LLM output to NarrativeFeatures dataclass
     features = NarrativeFeatures(
-        # Core fields from LLM
         actors=llm_features_dict.get("actors", []),
         claims=llm_features_dict.get("claims", []),
         evidence=llm_features_dict.get("evidence", []),
@@ -265,26 +333,24 @@ def run_pipeline(narrative_text: str, ta_raw: Dict[str, Any]):
         stance=llm_features_dict.get("stance", "neutral"),
         narrative_frames=llm_features_dict.get("narrative_frames", []),
         rhetorical_devices=llm_features_dict.get("rhetorical_devices", []),
-        ttp_signals=llm_features_dict.get("ttp_signals", []),
+        ttp_signals=llm_features_dict.get("ttp_signals", []),  # Legacy — can be empty now
         cross_narrative_links=llm_features_dict.get("cross_narrative_links", []),
 
-        # Legacy field mapping for backward compatibility
-        # These ensure REPORT_GENERATOR and other modules don't break
-        structural_features=llm_features_dict.get("narrative_frames", []),  # Best proxy: frames are structural
-        detected_intents=llm_features_dict.get("claims", []),               # Claims often reveal intent
-        emotional_features=llm_features_dict.get("rhetorical_devices", []), # Emotional rhetoric (e.g., fear appeal)
+        # Legacy mapping (kept for backward compatibility with REPORT_GENERATOR)
+        structural_features=llm_features_dict.get("narrative_frames", []),
+        detected_intents=llm_features_dict.get("claims", []),
+        emotional_features=llm_features_dict.get("rhetorical_devices", []),
         identity_features=[
             actor for actor in llm_features_dict.get("actors", [])
-            if any(identity_keyword in actor.lower() for identity_keyword in 
-                   ["regime", "forces", "people", "civilians", "complex", "government"])
-        ],  # Rough identity proxy from actors
-        rhetorical_features=llm_features_dict.get("rhetorical_devices", [])  # Direct match (old name)
+            if any(kw in actor.lower() for kw in ["regime", "forces", "people", "civilians", "government", "elite", "authority"])
+        ],
+        rhetorical_features=llm_features_dict.get("rhetorical_devices", [])
     )
 
-    # 2. Target Audience analysis
+    # 4. Target audience vulnerability analysis
     vuln_map = analyze_target_audience(features, payload.target_audience)
 
-    # 3. Peripheral signals
+    # 5. Peripheral signals analysis
     peripheral = PERIPHERAL_ANALYZER(
         cleaned.raw_text,
         features,
@@ -292,31 +358,43 @@ def run_pipeline(narrative_text: str, ta_raw: Dict[str, Any]):
         payload.target_audience
     )
 
-    # 4. CVF mapping
-    cvf_result = map_to_cvf(
-        features,
-        payload.target_audience,
-        vuln_map
-    )
+    # 6. Direct Local TTP Identification (Core of New Pipeline)
+    ttp_results = identify_ttp_dual(cleaned.raw_text, top_k_per_registry=5)
 
-    # 5. Risk scoring
-    risk = RISK_SCORER(
-        vuln_map,
-        peripheral,
-        cvf_result=cvf_result
-    )
+    # Create lightweight result container (replaces old cvf_result)
+    pipeline_result={
+        "features": features,
+        "vuln_map": vuln_map,
+        "peripheral": peripheral,
+        "identified_ttps": ttp_results,
+        "ttp_count": len(ttp_results),
+        "dominant_ttp": ttp_results[0] if ttp_results else None,
+        "activated_ttp_ids": [t["id"] for t in ttp_results],
+        "details": {  # For compatibility with old code if needed
+            "identified_ttps": ttp_results,
+            "activated_ttp_ids": [t["id"] for t in ttp_results]
+        }
+    }
 
-    # 6. CVF graph
-    visualize_ttp_overlap_network(cvf_result, threshold=0.6)
+    # 7. Risk scoring (PMESII-based)
+    # Update RISK_SCORER to accept identified_ttps or vuln_map/peripheral only
+    risk = RISK_SCORER(vuln_map, peripheral, identified_ttps=ttp_results)
+
+    # 8. Visualizations
+    
+    visualize_ttp_radar(CVFResult, cleaned.raw_text)  # Uses identify_ttp internally
+
     visualize_pmesii_radar(risk)
 
-    # 7. Final report
+    # 9. Final analyst report
+    # Update REPORT_GENERATOR to accept identified_ttps
     report = REPORT_GENERATOR(
-        features,
-        vuln_map,
-        peripheral,
-        risk,
-        payload.target_audience
+        features=features,
+        vuln_map=vuln_map,
+        peripheral=peripheral,
+        risk=risk,
+        ta=payload.target_audience,
+        identified_ttps=ttp_results  # New parameter
     )
 
     return report
