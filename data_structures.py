@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
+
 
 @dataclass
 class Demographics:
@@ -74,25 +75,28 @@ class PeripheralSignals:
 
 @dataclass
 class RiskAssessment:
-    risk_index: int
-    instability: float
-    confidence: float
-    p: float
-    m: float
-    e: float
-    s: float
-    i: float
-    infra: float
+    risk_index: int          # 1–100
+    instability: float       # 0.0–1.0
+    confidence: float        # Model confidence in score
+    p: float                 # Political
+    m: float                 # Military
+    e: float                 # Economic
+    s: float                 # Social
+    i: float                 # Information
+    infra: float             # Infrastructure
 
 @dataclass
 class DiagnosticReport:
-    target_audience_summary: Dict[str, str]
+    target_audience_summary: Dict[str, Any]
     psychological_vulnerabilities: List[str]
     sociocultural_vulnerabilities: List[str]
     narrative_category: str
-    peripheral_indicators: Dict[str, List[str]]
-    risk_score: float
+    peripheral_indicators: Dict[str, Any]
+    risk_score: int
     full_report_text: str
+
+    # NEW: Identified TTPs — use string annotation for compatibility
+    identified_ttps: List[Dict[str, Any]] = field(default_factory=list)
 
 @dataclass
 class Payload:
