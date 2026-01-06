@@ -1,112 +1,88 @@
 import plotly.graph_objects as go
-import networkx as nx
-import numpy as np
+from ttp_id import identify_ttp_dual
 
-def visualize_ttp_overlap_network(cvf_result, threshold=0.6):
+def visualize_ttp_radar(cvf_result, narrative_text: str):
     """
-    Creates an interactive Plotly network graph of TTP overlaps.
-    
-    Args:
-        cvf_result: The CVFResult object from cvf_model.map_to_cvf
-        threshold: Minimum similarity score for drawing an edge (0.0–1.0)
+    Renders a radar (spiderweb) chart using direct TTP identification.
+    - Axes: Top identified CAT TTPs from the narrative
+    - Values: Confidence score (0–1) from embedding similarity
+    - Title shows exact number of identified TTPs
     """
-    ttp_cluster = cvf_result.details.get("ttp_cluster", {})
-    similarities = ttp_cluster.get("similarities", {})
-    activated_ttps = cvf_result.details.get("activated_ttp_ids", [])
-    
-    if not similarities:
-        print("No TTP similarities available — skipping network graph.")
+    # Get top identified TTPs with confidence
+    identified_ttps = identify_ttp_dual(narrative_text, top_k_per_registry=5)
+
+    if not identified_ttps:
+        print("No TTPs identified — rendering empty radar chart.")
+        fig = go.Figure()
+        fig.add_annotation(
+            text="No relevant CAT TTPs identified in the narrative.",
+            xref="paper", yref="paper",
+            x=0.5, y=0.5,
+            showarrow=False,
+            font_size=16,
+            align="center"
+        )
+        fig.update_layout(
+            title="CAT TTP Identification Radar (No Matches)",
+            height=600,
+            plot_bgcolor="white"
+        )
+        fig.write_html("ttp_radar_chart.html")
+        fig.show()
         return
 
-    # Build NetworkX graph
-    G = nx.Graph()
+    # Build categories and values
+    categories = []
+    values = []
+    dominant_name = "None"
+    dominant_conf = 0.0
 
-    # Add all known TTPs as nodes
-    for ttp_id in similarities.keys():
-        # Node size based on similarity (or 1 if not activated)
-        sim_score = similarities.get(ttp_id, 0.0)
-        size = 30 if ttp_id in activated_ttps else 15
-        color = "red" if ttp_id in activated_ttps else "lightblue"
-        G.add_node(ttp_id, size=size * (sim_score + 0.5), color=color, title=ttp_id)
+    for ttp in identified_ttps:
+        source = ttp.get("source", "CAT")
+        name = ttp["name"]
+        ttp_id = ttp["id"]
+        conf = ttp["confidence"]
 
-    # Add edges for strong similarities
-    for ttp1, sim_dict in similarities.items():
-        for ttp2, score in sim_dict.items():
-            if score >= threshold and ttp1 != ttp2:
-                # Avoid duplicate edges
-                if G.has_edge(ttp1, ttp2) or G.has_edge(ttp2, ttp1):
-                    continue
-                G.add_edge(ttp1, ttp2, weight=score)
+        categories.append(f"{name}<br>({ttp_id})")  # ← This is the line
+        values.append(conf)
 
-    # Force-directed layout
-    pos = nx.spring_layout(G, k=0.5, iterations=50, seed=42)
+        # Track dominant
+        if conf > dominant_conf:
+            dominant_conf = conf
+            dominant_name = name
 
-    # Extract for Plotly
-    edge_x = []
-    edge_y = []
-    for edge in G.edges():
-        x0, y0 = pos[edge[0]]
-        x1, y1 = pos[edge[1]]
-        edge_x.extend([x0, x1, None])
-        edge_y.extend([y0, y1, None])
+    # Close the loop for radar
+    categories += categories[:1]
+    values += values[:1]
 
-    edge_trace = go.Scatter(
-        x=edge_x, y=edge_y,
-        line=dict(width=1, color='gray', opacity=0.6),
-        hoverinfo='none',
-        mode='lines')
+    fig = go.Figure()
 
-    node_x = []
-    node_y = []
-    node_text = []
-    node_size = []
-    node_color = []
-    for node in G.nodes():
-        x, y = pos[node]
-        node_x.append(x)
-        node_y.append(y)
-        sim = similarities.get(node, 0.0)
-        activated = " (ACTIVATED)" if node in activated_ttps else ""
-        node_text.append(f"{node}<br>Similarity: {sim:.3f}{activated}")
-        node_size.append(G.nodes[node].get('size', 15))
-        node_color.append(G.nodes[node].get('color', 'lightblue'))
+    fig.add_trace(go.Scatterpolar(
+        r=values,
+        theta=categories,
+        fill='toself',
+        fillcolor='rgba(255,100,100,0.3)',
+        line_color='rgba(255,50,50,1)',
+        name='Cognitive Attack Profile'
+    ))
 
-    node_trace = go.Scatter(
-        x=node_x, y=node_y,
-        mode='markers+text',
-        hoverinfo='text',
-        text=[node.split("-")[-1] for node in G.nodes()],  # Short label
-        textposition="top center",
-        marker=dict(
-            showscale=False,
-            color=node_color,
-            size=node_size,
-            line_width=2
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 1.0],
+                tickfont_size=10,
+                tickformat=".2f"
+            )
         ),
-        hovertext=node_text
+        showlegend=False,
+        title=f"CAT TTP Identification Radar<br>"
+              f"Dominant: {dominant_name} | "
+              f"Identified TTPs: {len(identified_ttps)}",
+        height=800,
+        margin=dict(t=100)
     )
 
-    fig = go.Figure(data=[edge_trace, node_trace],
-                    layout=go.Layout(
-                        title="TTP Overlap Network (Cognitive Attack Patterns)",
-                        titlefont_size=16,
-                        showlegend=False,
-                        hovermode='closest',
-                        margin=dict(b=20, l=5, r=5, t=40),
-                        annotations=[dict(
-                            text=f"Threshold: {threshold} | Activated: {len(activated_ttps)} TTPs",
-                            showarrow=False,
-                            xref="paper", yref="paper",
-                            x=0.005, y=-0.002
-                        )],
-                        xaxis=dict(showgrid=False, zeroline=False),
-                        yaxis=dict(showgrid=False, zeroline=False),
-                        plot_bgcolor='white'
-                    ))
-
-    # Export to interactive HTML
-    fig.write_html("ttp_overlap_network.html")
-    print("TTP overlap network graph saved as 'ttp_overlap_network.html'")
-
-    # Show in browser (optional)
+    fig.write_html("ttp_radar_chart.html")
+    print(f"TTP radar chart saved with {len(identified_ttps)} identified TTPs")
     fig.show()
