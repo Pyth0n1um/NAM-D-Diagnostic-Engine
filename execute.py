@@ -2,6 +2,7 @@ from dataclasses import asdict
 from typing import Dict, Any, List
 import numpy as np
 import matplotlib.pyplot as plt
+from cognitive_vulnerability_diagnosis import diagnose_cognitive_vulnerabilities
 
 
 # -----------------------------
@@ -19,10 +20,11 @@ from data_structures import (
     DiagnosticReport
 )
 
-from input_layer import INPUT_LAYER
+from input_layer import INPUT_LAYER, TargetAudience
 from target_audience import Optional, analyze_target_audience
 from AI_narrative_extraction import extract_narrative_features
 from cvf_graph_viz import visualize_ttp_radar
+from viz_cog_vuln import visualize_cog_vuln_radar
 from cvf_model import CVFResult
 from ttp_id import identify_ttp_dual
 from peripheral_analyzer import PERIPHERAL_ANALYZER
@@ -46,65 +48,107 @@ def NARRATIVE_INGEST(narrative: Narrative) -> Narrative:
 
 
 def RISK_SCORER(
-    vuln_map,
-    peripheral,
-    identified_ttps: Optional[List[Dict[str, Any]]] = None
+    vuln_map: VulnerabilityMap,
+    peripheral: PeripheralSignals,
+    identified_ttps: List[Dict[str, Any]],
+    narrative_text: str  # New: for keyword scanning
 ) -> RiskAssessment:
     """
     Computes PMESII-based instability and converts to 1–100 risk index.
-    
-    New design:
-    - No cvf_result dependency
-    - Optional boost from identified CAT TTPs (confidence-weighted)
-    - More granular hit detection
-    - Clear, maintainable logic
+    Fully integrated with dynamic target audience resonance, dual-registry TTPs, and keyword assistance.
     """
-    if identified_ttps is None:
-        identified_ttps = []
 
-    # --- Base Domain Scores (0.0–1.0) ---
+    # Base resonance from target audience analysis (0–1)
+    ta_resonance = vuln_map.alignment_score
 
-    # Political: institutional distrust, identity conflict
-    political_hits = {"institutional distrust", "corruption", "elite control"}
-    political = 1.0 if any(hit in political_hits for hit in vuln_map.sociocultural_hits) else 0.3
+    # TTP confidence lookup by keyword for domain boosts
+    ttp_conf_by_keyword = {}
+    for t in identified_ttps:
+        name_lower = t["name"].lower()
+        conf = t["confidence"]
+        for kw in name_lower.split():
+            ttp_conf_by_keyword[kw] = max(ttp_conf_by_keyword.get(kw, 0.0), conf)
 
-    # Military: direct threat framing
-    military_hits = {"threat", "attack", "aggression", "invasion"}
-    military = 1.0 if any(hit in military_hits for hit in peripheral.framing_patterns) else 0.2
+    # Keyword Dictionaries for Narrative Scanning
+    political_keywords = ["eu", "un", "icc", "icj", "brussels", "the hague", "brics", "nato", "wto", "g7", "g20", "sanctions", "diplomacy", "treaty", "summit", "election", "regime", "elite", "corruption", "deep state", "polarization", "sovereignty", "international law"]
+    military_keywords = ["nato", "army", "navy", "air force", "military equipment", "troops", "battalion", "division", "weapon", "missile", "drone", "cyberwar", "hybrid warfare", "aggression", "invasion", "defense", "alliance", "peacekeeping", "arms race"]
+    economic_keywords = ["oil", "opec", "sanctions", "shipping", "gas", "energy", "trade war", "tariff", "currency", "inflation", "recession", "supply chain", "blockade", "boycott", "market crash", "poverty", "wealth gap"]
+    social_keywords = ["community", "tribe", "ethnicity", "religion", "protest", "riot", "migration", "demographic", "inequality", "social media amplification", "echo chamber", "genocide", "human rights", "civil unrest", "polarization", "identity politics"]
+    information_keywords = ["fake news", "disinformation", "misinformation", "deepfake", "bot", "amplify", "narrative", "framing", "censorship", "media bias", "information warfare"]
+    infrastructure_keywords = ["power grid", "transportation", "water", "communication network", "cyber infrastructure", "supply lines", "port", "pipeline", "critical infrastructure"]
 
-    # Economic: scarcity, anxiety
-    economic_hits = {"economic anxiety", "scarcity", "crisis"}
-    economic = 1.0 if any(hit in economic_hits for hit in vuln_map.sociocultural_hits) else 0.3
+    # Scan Narrative for Keyword Hits
+    narrative_lower = narrative_text.lower()
 
-    # Social: polarization, identity tension
-    social = 0.8 if vuln_map.psychological_hits else 0.2
-    social = max(social, 0.6 if "identity" in " ".join(vuln_map.sociocultural_hits).lower() else social)
+    def keyword_hit_score(keywords: List[str], multiplier: float = 0.1) -> float:
+        hits = sum(1 for kw in keywords if kw.lower() in narrative_lower)
+        return min(hits * multiplier, 0.6)  # Cap to avoid over-boost
 
-    # Information: cognitive activation via identified TTPs
-    ttp_conf_sum = sum(t["confidence"] for t in identified_ttps)
-    information = min(1.0, ttp_conf_sum / 5.0)  # Normalize: 5 high-confidence TTPs = full
+    # Domain Boost Function (Unchanged)
+    def domain_boost(base: float, keywords: List[str], source_hits: List[str] = None, max_boost: float = 0.5) -> float:
+        strength = 0.0
+        if source_hits:
+            strength += sum(1 for hit in source_hits if any(kw in hit.lower() for kw in keywords)) * 0.2
+        strength += sum(ttp_conf_by_keyword.get(kw, 0.0) for kw in keywords) * 0.3
+        return min(base + strength, base + max_boost)
 
-    # Infrastructure: urgency, crisis windows
-    infra_hits = {"crisis_window", "urgency", "limited time", "now or never"}
-    infrastructure = 0.9 if any(hit in infra_hits for hit in peripheral.temporal_cues) else 0.3
+    # Political
+    political = domain_boost(0.3, political_keywords, vuln_map.sociocultural_hits, max_boost=0.7)
+    political += keyword_hit_score(political_keywords, 0.15)
+    if any(kw in " ".join([t["name"].lower() for t in identified_ttps]) for kw in ["politicized", "distrust", "identity"]):
+        political = min(1.0, political + 0.2)
 
-    # --- Weighted Instability ---
+    # Military
+    military = domain_boost(0.35, military_keywords, peripheral.framing_patterns, max_boost=0.65)
+    military += keyword_hit_score(military_keywords, 0.12)
+
+    # Economic
+    economic = domain_boost(0.3, economic_keywords, vuln_map.sociocultural_hits, max_boost=0.7)
+    economic += keyword_hit_score(economic_keywords, 0.15)
+
+    # Social
+    social = domain_boost(0.2, social_keywords, vuln_map.psychological_hits + vuln_map.sociocultural_hits, max_boost=0.4)
+    social += keyword_hit_score(social_keywords, 0.1)
+
+    # Information (core driver)
+    information = min(1.0, sum(t["confidence"] for t in identified_ttps) / 4.0)
+    information += keyword_hit_score(information_keywords, 0.18)
+
+    # Infrastructure
+    infrastructure = domain_boost(0.3, infrastructure_keywords, peripheral.temporal_cues, max_boost=0.6)
+    infrastructure += keyword_hit_score(infrastructure_keywords, 0.12)
+
+    # Clamp to 0–1
+    political, military, economic, social, information, infrastructure = [
+        max(0.0, min(1.0, v)) for v in [political, military, economic, social, information, infrastructure]
+    ]
+
+    # Apply audience resonance multiplier
+    instability_components = [
+        political * (1 + ta_resonance * 0.2),
+        military * (1 + ta_resonance * 0.2),
+        economic * (1 + ta_resonance * 0.2),
+        social * (1 + ta_resonance * 0.2),
+        information * (1 + ta_resonance * 0.3),
+        infrastructure * (1 + ta_resonance * 0.15)
+    ]
+
+    # Weighted instability
     instability = (
-        0.20 * political +
-        0.15 * military +
-        0.15 * economic +
-        0.20 * social +
-        0.20 * information +   # Strong weight — cognitive is core
-        0.10 * infrastructure
+        0.20 * instability_components[0] +
+        0.10 * instability_components[1] +
+        0.15 * instability_components[2] +
+        0.20 * instability_components[3] +
+        0.25 * instability_components[4] +
+        0.10 * instability_components[5]
     )
 
     instability = max(0.0, min(1.0, instability))
 
-    # --- Risk Index (1–100) ---
+    # Risk index
     risk_index = int(instability * 99) + 1
 
-    # --- Confidence in Score ---
-    # Higher if multiple strong signals
+    # Confidence
     signal_count = sum([
         political > 0.5,
         military > 0.5,
@@ -113,12 +157,12 @@ def RISK_SCORER(
         information > 0.5,
         infrastructure > 0.5
     ])
-    confidence = 0.6 + 0.4 * (signal_count / 6.0)  # 0.6–1.0
+    confidence = round(0.6 + 0.4 * (signal_count / 6.0), 2)
 
     return RiskAssessment(
         risk_index=risk_index,
         instability=instability,
-        confidence=round(confidence, 2),
+        confidence=confidence,
         p=political,
         m=military,
         e=economic,
@@ -173,6 +217,7 @@ def REPORT_GENERATOR(
     risk: RiskAssessment,
     ta: TargetAudience,
     identified_ttps,
+    cognitive_vulnerabilities: List[Dict[str, Any]]
 ) -> DiagnosticReport:
     """
     Generates a comprehensive analyst-style diagnostic report.
@@ -199,10 +244,26 @@ def REPORT_GENERATOR(
                 f"| {rank:<4} | {source:<7} | {display_name:<35} | {ttp_id:<15}  | {conf:.3f}     |\n"
             )
     else:
-        ttp_section += "### TOP IDENTIFIED TTPs (CAT + DISARM)\n"
+        ttp_section += "### TOP IDENTIFIED TTPs (DISARM)\n"
         ttp_section += "No relevant TTPs identified in the narrative.\n"
 
     ttp_section += "\n"
+
+    cog_vuln_section = "### COGNITIVE VULNERABILITY PROFILE\n"
+    if cognitive_vulnerabilities:
+        cog_vuln_section += "| Rank | Vulnerability                       | Confidence          | Key Indicators Matched |\n"
+        cog_vuln_section += "|------|-------------------------------------|---------------------|------------------------|\n"
+        for rank, vuln in enumerate(cognitive_vulnerabilities, 1):
+            name = vuln["name"]
+            conf = vuln["confidence"]
+            indicators = ", ".join(vuln.get("indicators_matched", [])) or "None explicit"
+            cog_vuln_section += f"| {rank:<4} | {name:<35} | {conf:.3f}    | {indicators:<15}              |\n"
+        cog_vuln_section += "\n"
+        dominant = cognitive_vulnerabilities[0]["name"]
+        avg_conf = sum(v["confidence"] for v in cognitive_vulnerabilities) / len(cognitive_vulnerabilities)
+        cog_vuln_section += f"**Dominant Vulnerability**: {dominant} (Avg Confidence: {avg_conf:.3f})\n"
+    else:
+        cog_vuln_section += "No significant cognitive vulnerabilities diagnosed.\n"
 
     # --- Full Report Text ---
     full_text = f"""
@@ -224,14 +285,8 @@ Orientation:
 
 [2] COGNITIVE VULNERABILITY PROFILE
 -----------------------------------
-Psychological Vulnerabilities Exploited:
-  - {', '.join(vuln_map.psychological_hits) or 'None clearly detected'}
 
-Sociocultural Vulnerabilities Exploited:
-  - {', '.join(vuln_map.sociocultural_hits) or 'None clearly detected'}
-
-Summary:
-  {vuln_map.vulnerability_summary.get('note', 'No summary available')}
+{cog_vuln_section}
 
 [3] NARRATIVE CHARACTERISTICS
 -----------------------------
@@ -308,14 +363,14 @@ Domain Drivers:
 # -----------------------------
 def run_pipeline(narrative_text: str, ta_raw: Dict[str, Any]):
     """
-    Full NAM-D pipeline — local, deterministic, no grammar/LLM server for TTPs.
+    Full NAM-D pipeline — local, deterministic, hybrid CAT+DISARM TTP identification.
     - Narrative feature extraction (LLM-powered)
-    - Target audience vulnerability analysis
+    - Dynamic target audience vulnerability analysis (TTP-aware)
     - Peripheral signals
-    - Direct TTP identification via embedding similarity
-    - Risk scoring
+    - Dual-registry TTP identification (CAT + DISARM)
+    - Risk scoring with audience resonance
     - Radar visualizations
-    - Final report
+    - Final analyst report
     """
     # 1. Input processing
     payload = INPUT_LAYER(narrative_text, ta_raw)
@@ -333,10 +388,10 @@ def run_pipeline(narrative_text: str, ta_raw: Dict[str, Any]):
         stance=llm_features_dict.get("stance", "neutral"),
         narrative_frames=llm_features_dict.get("narrative_frames", []),
         rhetorical_devices=llm_features_dict.get("rhetorical_devices", []),
-        ttp_signals=llm_features_dict.get("ttp_signals", []),  # Legacy — can be empty now
+        ttp_signals=llm_features_dict.get("ttp_signals", []),  # Legacy
         cross_narrative_links=llm_features_dict.get("cross_narrative_links", []),
 
-        # Legacy mapping (kept for backward compatibility with REPORT_GENERATOR)
+        # Legacy compatibility fields
         structural_features=llm_features_dict.get("narrative_frames", []),
         detected_intents=llm_features_dict.get("claims", []),
         emotional_features=llm_features_dict.get("rhetorical_devices", []),
@@ -347,57 +402,67 @@ def run_pipeline(narrative_text: str, ta_raw: Dict[str, Any]):
         rhetorical_features=llm_features_dict.get("rhetorical_devices", [])
     )
 
-    # 4. Target audience vulnerability analysis
-    vuln_map = analyze_target_audience(features, payload.target_audience)
+    # 4. Dual-registry TTP Identification (CAT + DISARM)
+    ttp_results = identify_ttp_dual(cleaned.raw_text, top_k_per_registry=5)
 
-    # 5. Peripheral signals analysis
+    # 5. Dynamic Target Audience Vulnerability Analysis (uses TTPs)
+    ta_vuln_map = analyze_target_audience(features, payload.target_audience, ttp_results)
+
+    # 6. Peripheral signals analysis
     peripheral = PERIPHERAL_ANALYZER(
         cleaned.raw_text,
         features,
-        vuln_map,
+        ta_vuln_map,
         payload.target_audience
     )
 
-    # 6. Direct Local TTP Identification (Core of New Pipeline)
-    ttp_results = identify_ttp_dual(cleaned.raw_text, top_k_per_registry=5)
-
-    # Create lightweight result container (replaces old cvf_result)
-    pipeline_result={
-        "features": features,
-        "vuln_map": vuln_map,
-        "peripheral": peripheral,
-        "identified_ttps": ttp_results,
-        "ttp_count": len(ttp_results),
-        "dominant_ttp": ttp_results[0] if ttp_results else None,
-        "activated_ttp_ids": [t["id"] for t in ttp_results],
-        "details": {  # For compatibility with old code if needed
-            "identified_ttps": ttp_results,
-            "activated_ttp_ids": [t["id"] for t in ttp_results]
-        }
-    }
-
-    # 7. Risk scoring (PMESII-based)
-    # Update RISK_SCORER to accept identified_ttps or vuln_map/peripheral only
-    risk = RISK_SCORER(vuln_map, peripheral, identified_ttps=ttp_results)
+    # 7. Risk scoring (uses dynamic vuln_map with audience resonance)
+    risk = RISK_SCORER(ta_vuln_map, peripheral, ttp_results, cleaned.raw_text)
 
     # 8. Visualizations
-    
-    visualize_ttp_radar(CVFResult, cleaned.raw_text)  # Uses identify_ttp internally
-
+    visualize_ttp_radar(CVFResult, cleaned.raw_text)  # Uses identify_ttp_dual internally
     visualize_pmesii_radar(risk)
 
+    # Convert VulnerabilityMap to dict for profile
+    ta_profile_dict = {
+        "psychological_hits": ta_vuln_map.psychological_hits,
+        "sociocultural_hits": ta_vuln_map.sociocultural_hits,
+        "alignment_score": ta_vuln_map.alignment_score,
+        "vulnerability_summary": ta_vuln_map.vulnerability_summary
+    }
+
+    cognitive_vulnerabilities = diagnose_cognitive_vulnerabilities(
+        cleaned.raw_text,
+        ta_profile_dict,
+        top_k=10
+    )
+
+    visualize_cog_vuln_radar(cleaned.raw_text, ta_profile_dict)
+
+
     # 9. Final analyst report
-    # Update REPORT_GENERATOR to accept identified_ttps
     report = REPORT_GENERATOR(
         features=features,
-        vuln_map=vuln_map,
+        vuln_map=ta_vuln_map,           # Dynamic version
         peripheral=peripheral,
         risk=risk,
         ta=payload.target_audience,
-        identified_ttps=ttp_results  # New parameter
+        identified_ttps=ttp_results,
+        cognitive_vulnerabilities=cognitive_vulnerabilities
     )
 
-    return report
+    # Optional: lightweight result container for future use
+    pipeline_result = {
+        "features": features,
+        "target_audience": payload.target_audience,
+        "vuln_map": ta_vuln_map,
+        "peripheral": peripheral,
+        "identified_ttps": ttp_results,
+        "risk": risk,
+        "report": report
+    }
+
+    return report  # or return pipeline_result if you want more data
 
 
 # -----------------------------
@@ -411,10 +476,10 @@ if __name__ == "__main__":
             "location": input("Enter Target Audience location: "),
             "education_level": input("Enter Target Audience education level: ")
         },
-        "political_orientation": input("Enter Target Audience political leaning: "),
-        "group_identities": ["union workers", "young parents"],
+        "political_orientation": ["Republican-leaning", "conservative"],
+        "group_identities": ["union workers", "young parents", "college students", "minority communities"],
         "known_vulnerabilities": ["economic anxiety", "institutional distrust"],
-        "information_channels": ["Facebook", "local news"]
+        "information_channels": ["Facebook", "local news", "Instagram", "YouTube", "TikTok"]
     }
 
     result = run_pipeline(narrative, ta)
