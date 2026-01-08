@@ -1,0 +1,38 @@
+root ::= "{" space actors-kv "," space claims-kv "," space evidence-kv "," space sentiment-kv "," space stance-kv "," space narrative-frames-kv "," space rhetorical-devices-kv "," space ttp-signals-kv "," space cross-narrative-links-kv "}" space
+
+actors ::= "[" space (string ("," space string)*)? "]" space
+actors-kv ::= "\"actors\"" space ":" space actors
+
+claims ::= "[" space (string ("," space string)*)? "]" space
+claims-kv ::= "\"claims\"" space ":" space claims
+
+evidence ::= "[" space (string ("," space string)*)? "]" space
+evidence-kv ::= "\"evidence\"" space ":" space evidence
+
+sentiment ::= ("\"positive\"" | "\"negative\"" | "\"neutral\"") space
+sentiment-kv ::= "\"sentiment\"" space ":" space sentiment
+
+stance ::= ("\"supportive\"" | "\"critical\"" | "\"uncertain\"" | "\"neutral\"") space
+stance-kv ::= "\"stance\"" space ":" space stance
+
+narrative-frames ::= "[" space (string ("," space string)*)? "]" space
+narrative-frames-kv ::= "\"narrative_frames\"" space ":" space narrative-frames
+
+rhetorical-devices ::= "[" space (string ("," space string)*)? "]" space
+rhetorical-devices-kv ::= "\"rhetorical_devices\"" space ":" space rhetorical-devices
+
+cross-narrative-links ::= "[" space (string ("," space string)*)? "]" space
+cross-narrative-links-kv ::= "\"cross_narrative_links\"" space ":" space cross-narrative-links
+
+ttp-signals ::= "[" space (ttp-object ("," space ttp-object)*)? "]" space
+ttp-signals-kv ::= "\"ttp_signals\"" space ":" space ttp-signals
+
+ttp-object ::= "{" space ttp-id-kv "," space ttp-name-kv "," space ttp-desc-kv "}" space
+ttp-id-kv ::= "\"id\"" space ":" space string
+ttp-name-kv ::= "\"name\"" space ":" space string
+ttp-desc-kv ::= "\"description\"" space ":" space string
+
+string ::= "\"" char* "\"" space
+char ::= [^"\\\x7F\x00-\x1F] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F]{4})
+
+space ::= [ \t\n]*
